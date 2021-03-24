@@ -1,0 +1,487 @@
+import matplotlib
+matplotlib.use('Agg')
+
+from keras.layers import  Dropout, Dense, LSTM, Embedding, Bidirectional
+from keras.models import Sequential
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+
+import numpy as np
+import os
+import csv
+from sklearn import metrics
+import pandas as pd
+from keras.callbacks import EarlyStopping, TensorBoard
+import  matplotlib.pyplot as plt
+from sklearn import preprocessing
+import ast
+from sklearn.model_selection import StratifiedShuffleSplit
+from datetime import datetime, timedelta
+import tensorflow as tf
+from sklearn.linear_model import LogisticRegressionCV, SGDClassifier
+# from sklearn.svm import SVC
+from sklearn.ensemble import RandomForestClassifier
+import time
+import re
+import random
+import joblib
+#%%
+import time
+W_start_time=time.time() 
+
+TimeKeeper = dict()
+EXPERIMENT_NAME = os.path.basename(__file__)
+TimeKeeper['ExperimentName'] = EXPERIMENT_NAME
+TimeKeeper['TimeStart'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+# TimeKeeper['TimeTaken_Preparation'] = 0
+# TimeKeeper['TimeTaken_ModelCreation'] = 0
+# TimeKeeper['Epochs'] = 0
+# TimeKeeper['Accuracy'] = 0
+# TimeKeeper['F1'] = 0
+# TimeKeeper['Recall'] = 0
+
+#%%
+# Custom Functions
+from Grab_gSheets_Functions import get_google_sheet, gsheet_to_df
+from DNN_Functions import * #Bag_of_Words_DNN, LSTM_DNN, plot_metrics, model_data_preperation
+# Load hyperparameters
+from hyperparameters import *
+
+
+#FLAGSTART#
+# THESE HAVE TO REMAMIN IN POSITION AFTER THE FLAG START
+TRAINING_RANGES = 
+PREDICTION_RANGES = 
+MODEL_NAME = 
+ANALYSIS_METHOD = 
+
+#%%
+
+# Null theses for LR and SVM or RFC
+TimeKeeper['Epochs'] = 0 # len(history.epoch)
+TimeKeeper['acc'] = 0 # model.history.history['acc'][-1]
+TimeKeeper['loss'] = 0 # model.history.history['loss'][-1]
+TimeKeeper['val_loss'] = 0 # model.history.history['val_loss'][-1]
+TimeKeeper['val_acc'] = 0 #model.history.history['val_acc'][-1]
+
+#%%
+########
+W_start_time=time.time() 
+print("Begin Preparing Data")
+#%%
+
+
+TimeKeeper['ModelName'] = MODEL_NAME
+
+
+print("-"*25)
+print("\n")
+print("Training Datasets : " + str(TRAINING_RANGES))
+print("\n")
+print("Prediction Datasets : " + str(PREDICTION_RANGES))
+
+
+SPREADSHEET_ID = '1j9BHMXVBOgEOwQtacEMLG-YWSasy_1b04LK-8T_uJ8Y'
+
+# LOAD TRAINING DATA
+
+if len(TRAINING_RANGES)>1:
+    TrainingData =  pd.read_csv('Datasets/' + str(TRAINING_RANGES[0]) + '.csv')
+    for RANGE_NAME in TRAINING_RANGES[1:]:
+        TrainingData =  pd.concat([TrainingData, pd.read_csv('Datasets/' + str(RANGE_NAME) + '.csv')])
+else:
+    TrainingData =  pd.read_csv('Datasets/' + str(TRAINING_RANGES[0]) + '.csv')
+
+# LOAD DATA TO PREDICT
+if len(PREDICTION_RANGES)>1:
+    PredictionData =  pd.read_csv('Datasets/' + str(PREDICTION_RANGES[0]) + '.csv')
+    for RANGE_NAME in PREDICTION_RANGES[1:]:
+        PredictionData =  pd.concat([PredictionData, pd.read_csv('Datasets/' + str(RANGE_NAME) + '.csv')])
+else:
+    PredictionData =  pd.read_csv('Datasets/' + str(PREDICTION_RANGES[0]) + '.csv')
+
+#%%
+
+
+print("Training Data Size : {}".format(TrainingData.shape))
+print("Prediction Data Size : {}".format(PredictionData.shape))
+print("-"*25)
+
+print("-"*25)
+print("Head of Prediction")
+print(PredictionData.head())
+print("-"*25)
+
+
+'''
+2. Explore - Duplicate rows with only 1 count
+'''
+MergeData = TrainingData.reset_index().drop(columns='index') 
+LowCountRows = MergeData.groupby('Coded').filter(lambda x: len(x)<2).index.tolist()
+
+MergeData = pd.concat([MergeData.iloc[LowCountRows,],MergeData]).reset_index().drop(columns='index') # Add the rows on top that are low count
+
+articles = MergeData['Label']
+labels =  MergeData['Coded']
+
+#%%
+
+'''
+3. Prepare Data - 
+'''
+# DO I NEED THIS LITTLE BIT HERE
+##########
+# train_size = int(len(articles) * training_portion)
+
+# train_articles = articles[0: train_size]
+# train_labels = labels[0: train_size]
+
+# validation_articles = articles[train_size:]
+# validation_labels = labels[train_size:]
+##########
+
+
+
+sss = StratifiedShuffleSplit(n_splits=1, test_size=1-training_portion, random_state=0) #change from 0.1 to 0.3 after HINTS
+
+for train_index, test_index in sss.split(X=articles, y= labels):
+    print("TRAIN:", train_index, "TEST:", test_index)
+    train_articles, validation_articles = articles[train_index], articles[test_index] 
+    train_labels, validation_labels = labels[train_index], labels[test_index]
+
+
+# print("Sizes of the training and validation articles and labels" + str(train_size))
+print("Training X set: " + str(len(train_articles)))
+print("Training Y set: " + str(len(train_labels)))
+print("Validation X set: " + str(len(validation_articles)))
+print("Validation X set: " + str(len(validation_labels)))
+
+#%%
+'''
+Tokenzier
+'''
+
+tokenizer = Tokenizer(num_words = vocab_size, oov_token=oov_tok)
+tokenizer.fit_on_texts(articles)
+word_index = tokenizer.word_index
+
+
+'''
+Lokenizing the Labels
+'''
+
+label_tokenizer = Tokenizer(
+    num_words=None, filters='#', lower=False,
+    split='#', char_level=False, oov_token=oov_tok, document_count=0)
+
+label_tokenizer.fit_on_texts(labels)
+
+training_label_seq = np.array(label_tokenizer.texts_to_sequences(train_labels))
+
+validation_label_seq = np.array(label_tokenizer.texts_to_sequences(validation_labels))
+
+
+#%%
+
+'''
+Article Decoding
+'''
+
+reverse_word_index = dict([(value, key) for (key, value) in word_index.items()])
+
+def decode_article_BoW(text):
+    text = np.argwhere(text>0).ravel()
+    return ' '.join([reverse_word_index.get(i, '?') for i in text])
+
+def decode_article_LSTM(text):
+    return ' '.join([reverse_word_index.get(i, '?') for i in text])
+
+
+
+
+#%%
+
+# Time Taken
+elapsed_time = time.time() - W_start_time
+print("Time taken to prepare " + str(timedelta(seconds=elapsed_time)))
+##################################
+'''
+Prepare data for input into model. Sequencing for LSTM and simple 
+'''
+
+
+check_random_article = np.random.randint(150)
+print("Random checking of articles in index : " + str(check_random_article))
+
+if ("LSTM" in ANALYSIS_METHOD) | ("GLV-LSTM" in ANALYSIS_METHOD) :
+    print("Sequencing LSTM")
+    print("-"*25)
+    train_sequences = tokenizer.texts_to_sequences(train_articles)
+    train_padded = pad_sequences(train_sequences, maxlen=max_length, padding=padding_type, truncating=trunc_type)
+
+    print(train_sequences[check_random_article])
+    print("Length of the training sequence : " + str(len(train_sequences[0])))
+    print("Length of the training sequence with padding: " + str(len(train_padded[0])))
+
+    validation_sequences = tokenizer.texts_to_sequences(validation_articles)
+    validation_padded = pad_sequences(validation_sequences, maxlen=max_length, padding=padding_type, truncating=trunc_type)
+
+    print("Length of the validation sequence : " + str(len(validation_sequences[0])))
+    print("Length of the validation sequence with padding: " + str(len(validation_padded[0])))
+
+    print("-"*25)
+    print("Decoding LSTM Sequence")
+    print(decode_article_LSTM(train_padded[check_random_article]))
+    print(np.array(train_articles)[check_random_article]) 
+
+    print("Returning train_padded, validation_padded")
+    print('-'*25)
+
+    X_train, X_val = train_padded, validation_padded
+    # return train_padded, validation_padded
+
+# ALL OTHER MODELS NEED A BAG OF WORDS
+else :
+    print("Bag of Words Model")
+    print("-"*25)
+
+    train_BoW = tokenizer.texts_to_matrix(train_articles)
+
+    print(np.argwhere(train_BoW[check_random_article]>0))
+    print("Bag of Words Training shape = " + str(train_BoW.shape))
+
+    validation_BoW = tokenizer.texts_to_matrix(validation_articles)
+
+    print("Bag of Words Validation shape = " + str(validation_BoW.shape))
+
+    print("-"*25)
+    print("Decoding BoW")
+    print(decode_article_BoW(train_BoW[check_random_article]))
+    print(np.array(train_articles)[check_random_article]) 
+
+    print("Returning train_train_BoW, validation_BoW")
+    print('-'*25)
+    X_train, X_val = train_BoW, validation_BoW
+
+    #return train_BoW, validation_BoW
+
+elapsed_time = time.time() - W_start_time
+print("Time taken to prepare " + str(timedelta(seconds=elapsed_time)))
+
+###########
+
+TimeKeeper['TimeTaken_Preparation'] = str(timedelta(seconds=elapsed_time))
+
+#%%
+'''
+
+Train the Model
+'''
+
+M_start_time=time.time() 
+
+logdir = "logs/scalars/" + datetime.now().strftime("%Y%m%d-%H%M%S") + str(TimeKeeper['ExperimentName'])
+tensorboard_callback = TensorBoard(log_dir=logdir)
+######
+if "FC" in ANALYSIS_METHOD:
+    model = Bag_of_Words_DNN(
+       shape = X_train.shape[1], 
+       nClasses = nClasses, 
+       dropout=dropout, 
+       node = node, 
+       nLayers = nLayers
+       )
+    model.summary()
+
+if "LSTM" in ANALYSIS_METHOD:
+    model = LSTM_DNN(
+       shape = X_train.shape[1], # not really used
+       nClasses = nClasses,
+       dropout=0.25, 
+       node = node, 
+       nLayers = nLayers, 
+       vocab_size = vocab_size, 
+       embedding_dim = embedding_dim, 
+       max_length = max_length
+       )
+    model.summary()
+
+if "GLV-LSTM" in ANALYSIS_METHOD:
+    print('Loading Glove Model...')
+    glove_embed_matrix, words_not_found =  load_glove(tokenizer.word_index)
+
+    # embed_matrix = np.hstack((glove_embed_matrix))
+    embed_matrix = glove_embed_matrix
+    model = GLV_LSTM(
+        embed_matrix = embed_matrix, 
+        nClasses = nClasses, 
+        dropout=0.25, 
+        node = node, 
+        nLayers = nLayers, 
+        # vocab_size = vocab_size, 
+        # embedding_dim = embedding_dim, 
+        max_length = max_length
+        )
+    model.summary()
+
+if "GLV-FC" in ANALYSIS_METHOD:
+    print('Loading Glove Model...')
+    glove_embed_matrix, words_not_found =  load_glove(tokenizer.word_index)
+
+    # embed_matrix = np.hstack((glove_embed_matrix))
+    embed_matrix = glove_embed_matrix
+    model = GLV_FC(
+        embed_matrix = embed_matrix, 
+        nClasses = nClasses, 
+        dropout=0.25, 
+        node = node, 
+        nLayers = nLayers, 
+        vocab_size = vocab_size, 
+        # embedding_dim = embedding_dim, 
+        max_length = vocab_size #### CHANGE TO MAKE THE MODEL ALIGN!
+        )
+    model.summary()
+
+if "LR" in ANALYSIS_METHOD:
+  model = LogisticRegressionCV(cv=2,
+                               penalty = 'l2', 
+                               random_state=0, 
+                               multi_class = 'multinomial', 
+                               class_weight = 'balanced',
+                               solver='saga',
+                               verbose=2, 
+                               max_iter=1000,
+                               n_jobs = -1
+                               )
+  model.get_params()
+
+# if "SVM" in ANALYSIS_METHOD:
+#   model = SVC(#cv=2,
+#                                # penalty = 'l2',
+#                                kernal = 'rbf',
+#                                C=1e-1, 
+#                                random_state=0, 
+#                                decision_function_shape = 'ovo', 
+#                                class_weight = 'balanced',
+#                                # solver='saga',
+#                                verbose=2, 
+#                                max_iter=1000 
+#                                # early_stopping = True,
+#                                # n_jobs = -1 # how many cpus to use
+#                                )
+#   model.get_params()
+
+if "RFC" in ANALYSIS_METHOD:
+  model = RandomForestClassifier(#cv=2,
+                                  n_estimators = 1000,
+                                  criterion = 'gini',
+                                  random_state = 0,
+                                  class_weight = 'balanced',
+                                  verbose=2, 
+                                  n_jobs = -1
+                               )
+  model.get_params()
+
+if (ANALYSIS_METHOD == "LR" )|(ANALYSIS_METHOD == "RFC"  ):
+    X_data, y_data = np.vstack((X_train,X_val)), np.vstack((training_label_seq,validation_label_seq))
+    model.fit(X_data, y_data)
+    filename = "Experiment_Outputs/"+str(EXPERIMENT_NAME) + str(datetime.now().strftime("%Y%m%d-%H%M%S")) + "model_" + str(ANALYSIS_METHOD)+".sav"
+    joblib.dump(model, filename)
+else:
+    history = model.fit(X_train, training_label_seq, 
+                    epochs=num_epochs, 
+                    batch_size = batch_size,
+                    # class_weight=class_weights,
+                    validation_data=(X_val, validation_label_seq), 
+                    verbose=2,
+                    callbacks=[EarlyStopping(monitor='val_loss', patience=10, min_delta=0.01),
+                               tensorboard_callback]
+                    )
+    # plot_metrics(model, model = ANALYSIS_METHOD, expStyle=True, EXPERIMENT_NAME = EXPERIMENT_NAME)
+    model.save("Experiment_Outputs/"+str(EXPERIMENT_NAME) + str(datetime.now().strftime("%Y%m%d-%H%M%S")) + "model_" + str(ANALYSIS_METHOD)+".h5")
+    print("Saved model to disk")
+
+
+
+elapsed_time = time.time() - M_start_time
+print("Time taken to create model " + str(timedelta(seconds=elapsed_time)))
+
+TimeKeeper['TimeTaken_ModelCreation'] = str(timedelta(seconds=elapsed_time))
+
+if not ANALYSIS_METHOD == "LR":
+  if not ANALYSIS_METHOD == "RFC":
+    TimeKeeper['Epochs'] = len(history.epoch)
+    TimeKeeper['acc'] = model.history.history['acc'][-1]
+    TimeKeeper['loss'] = model.history.history['loss'][-1]
+    TimeKeeper['val_loss'] = model.history.history['val_loss'][-1]
+    TimeKeeper['val_acc'] = model.history.history['val_acc'][-1]
+#%%
+
+'''
+Prediction Measures
+
+'''
+print("Begin Prediction Testing")
+
+txt = PredictionData['Label']
+
+if ("LSTM" in ANALYSIS_METHOD) | ("GLV-LSTM" in ANALYSIS_METHOD):
+    # LSTM
+    seq = tokenizer.texts_to_sequences(txt)
+    padded = pad_sequences(seq, maxlen=max_length, padding=padding_type, truncating=trunc_type)
+    test = padded
+else:
+    # Bag of Words
+    test = tokenizer.texts_to_matrix(txt)
+
+pred = model.predict(test)
+
+if (ANALYSIS_METHOD == "LR" )| (ANALYSIS_METHOD == "RFC" ) :
+    model_estimations = np.array(list(label_tokenizer.index_word.values()))[pred-1] # np array because can't slice a list. # -1 becuase of the list ordering. 
+else:
+    model_estimations = np.array(list(label_tokenizer.index_word.values()))[np.argmax(pred, axis=1)-1] # np array because can't slice a list. # -1 becuase of the list ordering. 
+    Output_Model_Prediction = pd.DataFrame(dict(Variable = PredictionData['Variable'],Label = PredictionData['Label'],PredictedClass = model_estimations, PredictedProbability = np.amax(pred,axis=1)))
+    Output_Model_Prediction.to_csv("Experiment_Outputs/"+str(EXPERIMENT_NAME)+"_" + str(datetime.now().strftime("%Y%m%d-%H%M%S"))+"Prediction_Output_" + str(MODEL_NAME) +".csv")
+
+# model_estimations = np.array(list(label_tokenizer.index_word.values()))[np.argmax(pred, axis=1)-1] # np array because can't slice a list. # -1 becuase of the list ordering. 
+# Output_Model_Prediction = pd.DataFrame(dict(Variable = PredictionData['Variable'],Label = PredictionData['Label'],PredictedClass = model_estimations, PredictedProbability = np.amax(pred,axis=1)))
+# Output_Model_Prediction.to_csv("Experiment_Outputs/"+str(EXPERIMENT_NAME)+"_" + str(datetime.now().strftime("%Y%m%d-%H%M%S"))+"Prediction_Output_" + str(ANALYSIS_METHOD) +".csv")
+
+
+print("-"*25)
+print("Classification Report for " + str(ANALYSIS_METHOD))
+print(metrics.classification_report(PredictionData['Coded'], model_estimations))
+print("\n\n Accuracy Score "+ str(ANALYSIS_METHOD) + " : ")
+print(metrics.accuracy_score(PredictionData['Coded'], model_estimations))
+
+print("-"*25)
+print("\n")
+
+PRF1 = metrics.precision_recall_fscore_support(PredictionData['Coded'], model_estimations, average='weighted')
+print("Precision, Recall, F1 Score: " )
+print("PRF1 :{}".format(PRF1))
+print("Preision : {0:0.4f}, Recall: {1:0.4f}, F1: {2:0.4f} ".format(PRF1[0], PRF1[1], PRF1[2]))
+print("-"*25)
+print("\n")
+
+
+TimeKeeper['TestAccuracy'] = metrics.accuracy_score(PredictionData['Coded'], model_estimations)
+TimeKeeper['TestPrecision'] = PRF1[0]
+TimeKeeper['TestRecall'] = PRF1[1]
+TimeKeeper['TestF1'] = PRF1[2]
+
+
+
+
+elapsed_time = time.time() - W_start_time
+print("Time taken to for whole script " + str(timedelta(seconds=elapsed_time)))
+
+TimeKeeper['TimeTaken_Script'] = str(timedelta(seconds=elapsed_time))
+
+TimeKeeper['TimeFinished'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+with open("Experiment_Outputs/" + str(EXPERIMENT_NAME)+"_"+str(datetime.now().strftime("%Y%m%d-%H%M%S"))+"stats_timekeeper.csv", 'w') as f:
+    for key in TimeKeeper.keys():
+        f.write("%s, %s\n" % (key, TimeKeeper[key]))
+
+print("Done")
